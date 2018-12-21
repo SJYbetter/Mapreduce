@@ -1,0 +1,64 @@
+hadoop.root=/Users/jieyusheng/download/hadoop-3.1.1
+spark.root=/Users/jieyusheng/download/spark-2.3.1-bin-hadoop2.7
+
+app.name=twitter_followers
+jar.name=twitter_followers_spark.jar
+job.main=cs6240.hw1.twitter_follwers
+job.args=target/classes/nodes.csv target/classes/edges.csv
+job.output=target/output
+master.local=local[*]
+master.pseudo=spark://172.16.10.180:7077
+maven.jar.name=twitter_followers_spark-1.0.0-SNAPSHOT.jar
+
+ts=$(shell date +%m%d_%H%M%S)
+aws.emr.release=emr-5.17.0
+aws.bucket.name=twitterfollowers
+aws.input=big_input
+aws.num.nodes=5
+aws.output=spark_output_${aws.num.nodes}_${ts}
+aws.log.dir=spark_log_${aws.num.nodes}_${ts}
+aws.instance.type=m3.xlarge
+#aws.instance.type=t2.medium
+
+default: local
+
+jar:
+	mvn package -DskipTests=true
+	# cp target/${maven.jar.name} ${jar.name}
+
+clean_local_target:
+	rm -rf ${job.output}
+
+local: clean_local_target jar
+	${spark.root}/bin/spark-submit.cmd --class ${job.main} --master ${master.local} target/${maven.jar.name} ${job.args} ${job.output}
+
+#pseudo: jar stop-yarn format-hdfs init-hdfs upload-input-hdfs start-yarn clean-local-output 
+pseudo: jar 
+	spark-submit --class ${job.main} --master ${master.pseudo} --deploy-mode cluster ${jar.name} ${job.args} ${job.output}
+	#make download-output-hdfs
+
+# Upload application to S3 bucket.
+upload-app-aws:
+	aws s3 cp target/${maven.jar.name} s3://${aws.bucket.name}
+
+# Delete S3 output dir.
+delete-output-aws:
+	aws s3 rm s3://${aws.bucket.name}/ --recursive --exclude "*" --include "${aws.output}*" --include "${aws.log.dir}*"
+
+# Main EMR launch.
+aws: jar upload-app-aws delete-output-aws
+	aws emr create-cluster \
+		--name "twitter followers spark ${aws.num.nodes}" \
+		--release-label ${aws.emr.release} \
+		--ec2-attributes KeyName=u1 \
+		--instance-groups '[{"InstanceCount":${aws.num.nodes},"InstanceGroupType":"CORE","InstanceType":"${aws.instance.type}"},{"InstanceCount":1,"InstanceGroupType":"MASTER","InstanceType":"${aws.instance.type}"}]' \
+	    --applications Name=Hadoop Name=Spark \
+		--steps Type=CUSTOM_JAR,Name="${app.name}",Jar="command-runner.jar",ActionOnFailure=CANCEL_AND_WAIT,Args=["spark-submit","--deploy-mode","cluster","--class","${job.main}","s3://${aws.bucket.name}/${maven.jar.name}","s3://${aws.bucket.name}/${aws.input}/nodes.csv","s3://${aws.bucket.name}/${aws.input}/edges.csv","s3://${aws.bucket.name}/${aws.output}"] \
+		--log-uri s3://${aws.bucket.name}/${aws.log.dir} \
+		--use-default-roles \
+		--enable-debugging 
+#		--auto-terminate
+
+# newstep: 
+# 	aws emr add-steps --cluster-id j-XXXXXXXX \
+# 		--steps Type=CUSTOM_JAR,Name=CustomJAR,ActionOnFailure=CONTINUE,Jar=s3://mybucket/mytest.jar,Args=arg1,arg2,arg3 Type=CUSTOM_JAR,Name=CustomJAR,ActionOnFailure=CONTINUE,Jar=s3://mybucket/mytest.jar,MainClass=mymainclass,Args=arg1,arg2,arg3
